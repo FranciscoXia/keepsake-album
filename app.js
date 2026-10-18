@@ -91,37 +91,25 @@ async function save(){
  console.warn('Album save failed',failure);storageProblem=storageFailure(failure);updateStorageNotice();toast('Not saved yet. See the message above for recovery options.');return false;
 }
 function toast(msg){$('#toast').textContent=msg;$('#toast').classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('#toast').classList.remove('show'),4200)}
-let standbyState='', standbyAlbumId=null, standbyTimer=null, standbyReturnFocus=null;
+let standbyState='', standbyTimer=null, standbyReturnFocus=null;
 function beginStandby(){
- const target=album();
- if(view!=='tabletop'||!target||!canTable(target)){toast('Open an album on this display before entering standby.');return}
- stopPlayback();standbyState='sleep';standbyAlbumId=target.id;standbyReturnFocus=document.activeElement;
+ if(standbyState)return;
+ stopPlayback();standbyState='sleep';standbyReturnFocus=document.activeElement;
  let root=$('#standby-root');if(!root){root=document.createElement('div');root.id='standby-root';document.body.append(root)}
- root.innerHTML=`<section class="standby-screen" role="dialog" aria-modal="true" aria-label="Album standby"><button class="standby-exit" data-action="cancel-standby" aria-label="Exit standby">${icon('close')}</button><button class="standby-wake" data-action="wake-album" aria-label="Wake album"><span>Touch to wake</span></button><div class="standby-reveal" aria-hidden="true"><p class="standby-brand">keepsake<span>.</span></p><button class="standby-cover" data-action="open-sleep-album" aria-label="Open ${esc(target.title)}" disabled><span class="standby-cover-photo"><img src="${esc(target.photos[0].src)}" alt="${esc(target.photos[0].alt)}"></span><span class="standby-cover-title">${esc(target.title)}</span><span class="standby-cover-date">${formattedDate(target.date)}</span><span class="standby-cover-invite">Open this memory ${icon('arrow')}</span></button><p class="standby-caption">A familiar story, waiting for you.</p></div></section>`;
+ root.innerHTML=`<section class="standby-screen" role="dialog" aria-modal="true" aria-label="Album standby"><button class="standby-exit" data-action="cancel-standby" aria-label="Exit standby">${icon('close')}</button><button class="standby-wake" data-action="wake-album" aria-label="Wake to home"><span>Touch to wake</span></button></section>`;
  $('#app').setAttribute('inert','');document.body.classList.add('album-standby');$('.standby-wake',root).focus();
 }
 function wakeStandby(){
  if(standbyState!=='sleep')return;
- standbyState='cover';const root=$('#standby-root');$('.standby-screen',root).classList.add('is-awake');
- $('.standby-wake',root).disabled=true;$('.standby-reveal',root).setAttribute('aria-hidden','false');
- const cover=$('.standby-cover',root);cover.disabled=false;cover.focus();
+ standbyState='opening';$('.standby-wake').disabled=true;
+ // Prepare the home page behind the black overlay, then reveal it in one tap.
+ currentId=null;view='library';filter='all';query='';immersive=false;render();$('.standby-screen').classList.add('is-opening');
+ standbyTimer=setTimeout(()=>{if(standbyState!=='opening')return;closeStandby(false);const heading=$('#app h1');heading?.setAttribute('tabindex','-1');heading?.focus()},350);
 }
 function closeStandby(restoreFocus=true){
- clearTimeout(standbyTimer);standbyTimer=null;standbyState='';standbyAlbumId=null;
+ clearTimeout(standbyTimer);standbyTimer=null;standbyState='';
  const root=$('#standby-root');if(root)root.innerHTML='';$('#app').removeAttribute('inert');document.body.classList.remove('album-standby');
  if(restoreFocus&&standbyReturnFocus?.isConnected)standbyReturnFocus.focus();standbyReturnFocus=null;
-}
-function openStandbyAlbum(){
- if(standbyState!=='cover')return;
- const target=data.albums.find(item=>item.id===standbyAlbumId);
- if(!target||!canTable(target)){closeStandby();toast('This album is no longer available for this viewer and display.');return}
- standbyState='opening';$('.standby-screen').classList.add('is-opening');$('.standby-cover').disabled=true;
- standbyTimer=setTimeout(()=>{
-  if(standbyState!=='opening')return;
-  const allowed=data.albums.find(item=>item.id===standbyAlbumId);
-  if(!allowed||!canTable(allowed)){closeStandby();return}
-  currentId=allowed.id;photoIndex=0;view='tabletop';immersive=true;closeStandby(false);render();$('#book')?.setAttribute('tabindex','-1');$('#book')?.focus();
- },600);
 }
 function wave(){return `<div class="wave" aria-hidden="true">${Array.from({length:38},(_,i)=>`<i style="height:${4+(i*17%19)}px"></i>`).join('')}</div>`}
 function audioBlock(a,p,i,contribution=null){const obj=contribution||p;if(!obj.audio&&!obj.voice)return '';return `<div class="audio-box"><button class="play" data-action="play" data-album="${a.id}" data-index="${i}" ${contribution?`data-contribution="${esc(contribution.id)}"`:''} aria-label="Play ${contribution?'contribution':'photo story'}">${icon('play')}</button><div class="audio-info"><b>${contribution?esc(people[obj.author]?.name||obj.author):'The voice behind the memory'}</b>${wave()}<small>${obj.audio?'Recorded voice note':'Demo narration · generated voice'}</small></div>${icon('mic')}</div>`}
@@ -132,9 +120,10 @@ function render(){
  const person=people[account];
  $('#app').innerHTML=`<div class="shell"><aside class="sidebar"><div><div class="brand">${icon('book')}<span>keepsake<span style="color:var(--coral)">.</span></span></div><div class="brand-sub">A hybrid memory album</div></div><nav class="nav" aria-label="Main navigation">${[['library','grid','My library'],['tabletop','book','Tabletop album'],['connections','users','People & devices'],['guide','info','Guide']].map(([v,i,t])=>`<button data-action="navigate" data-view="${v}" class="${view===v?'active':''}" aria-label="${t}" ${view===v?'aria-current="page"':''}>${icon(i)}${t}${v==='library'&&count?`<span class="dot">${count}</span>`:''}</button>`).join('')}</nav><div class="sidebar-note">${icon('heart')}<br>A little closer,<br>one memory at a time.<br><br><span style="font-size:9px">INTERACTIVE CONCEPT · 2026</span></div></aside><main class="main"><header class="topbar"><div class="crumb">Your space <span style="margin:0 8px">/</span> <b>${({library:'Memory library',tabletop:'The tabletop album',connections:'People & devices',guide:'Your demo companion'})[view]}</b></div><div class="top-actions"><span class="prototype">Local prototype</span><button class="profile" data-action="account" aria-label="Switch demo viewer account"><span class="avatar">${person.initial}</span><span>${person.name}<small>${person.role}</small></span>${icon('down')}</button></div></header><div id="storage-notice"></div>${view==='library'?libraryView():view==='tabletop'?tabletopView():view==='connections'?connectionsView():guideView()}</main></div>`;
  updateStorageNotice();
+ if(view!=='tabletop')$('.top-actions').insertAdjacentHTML('afterbegin',`<button class="btn ghost" data-action="album-standby">${icon('pause')}Standby</button>`);
  if(view==='library'&&!currentId){const input=$('#search');if(input)input.addEventListener('input',e=>{query=e.target.value;updateGrid()})}
  if(view==='tabletop')$('.tabletop-bar').insertAdjacentHTML('beforeend',`<button class="btn ghost" data-action="focus-mode">${icon('tablet')}${immersive?'Exit focus mode':'Focus mode'}</button>`);
- if(view==='tabletop'&&album()&&canTable(album()))$('.tabletop-bar').insertAdjacentHTML('beforeend',`<button class="btn ghost" data-action="album-standby">${icon('pause')}Standby</button>`);
+ if(view==='tabletop')$('.tabletop-bar').insertAdjacentHTML('beforeend',`<button class="btn ghost" data-action="album-standby">${icon('pause')}Standby</button>`);
  if(view==='tabletop'&&currentId)attachSwipe();
 }
 function libraryView(){if(currentId){const a=album();if(a&&canSee(a))return detailView(a);currentId=null;}
@@ -247,10 +236,9 @@ function download(content,name,type){const url=URL.createObjectURL(new Blob([con
 function printAlbum(){const a=album();closeModal();const section=document.createElement('div');section.className='print-only';section.id='print-album';section.innerHTML=a.photos.map((p,i)=>`<section class="print-page"><div class="eyebrow">${formattedDate(a.date)} · ${audienceName(a)} · ${i+1}/${a.photos.length}</div><h1>${esc(a.title)}</h1><img src="${esc(p.src)}" alt="${esc(p.alt)}"><h2>${esc(p.title)}</h2><p>${esc(p.caption)}</p>${a.contributions.filter(c=>c.status==='approved'&&c.photo===i).map(c=>`<p><b>${esc(people[c.author]?.name||c.author)}</b>: ${esc(c.text)}</p>`).join('')}<small>Keepsake · Every photo has a story worth keeping.</small></section>`).join('');document.body.append(section);const style=document.createElement('style');style.textContent='@media print{#app{display:none!important}#print-album{display:block}}';document.head.append(style);const cleanup=()=>{section.remove();style.remove();window.removeEventListener('afterprint',cleanup)};window.addEventListener('afterprint',cleanup);Promise.all([...section.querySelectorAll('img')].map(i=>i.decode().catch(()=>{}))).then(()=>window.print())}
 function validateBackup(obj){if(obj?.format!=='keepsake-album'||obj.version!==1||!Array.isArray(obj.albums)||!obj.albums.length||obj.albums.length>100)throw Error('Choose a Keepsake version 1 backup with 1–100 albums.');return obj.albums.map(a=>{if(!a||typeof a.title!=='string'||!a.title.trim()||!/^\d{4}-\d{2}-\d{2}$/.test(a.date)||!Number.isFinite(Date.parse(a.date))||!Array.isArray(a.photos)||!a.photos.length||a.photos.length>12)throw Error('The backup contains an incomplete album.');const media=(s,kind)=>s===null||s===undefined?null:typeof s==='string'&&(kind==='image'?/^data:image\/(jpeg|png|webp);base64,/.test(s):/^data:audio\/[\w.+-]+(?:;[^,]*)?;base64,/.test(s))?s:(()=>{throw Error('Unsupported media in backup. Use a backup exported from Keepsake.')})();const photos=a.photos.map(p=>({id:uid(),src:media(p.src,'image'),alt:String(p.alt||'Memory photograph').slice(0,300),title:String(p.title||'A moment to keep').slice(0,100),caption:String(p.caption||'').slice(0,5000),audio:media(p.audio,'audio'),voice:!!p.voice}));if(photos.some(p=>!p.src))throw Error('A photograph is missing from this backup.');return {id:uid(),title:a.title.slice(0,100),date:a.date,description:String(a.description||'').slice(0,500),theme:String(a.theme||'').slice(0,200),audience:['private','family','friends'].includes(a.audience)?a.audience:'private',recipients:Array.isArray(a.recipients)?a.recipients.filter(id=>people[id]?.group===a.audience&&id!=='emma'):[],devices:Array.isArray(a.devices)?a.devices.filter(id=>['family','friends'].includes(id)):[],favorite:!!a.favorite,photos,contributions:(Array.isArray(a.contributions)?a.contributions:[]).slice(0,100).filter(c=>Object.hasOwn(people,c.author)&&Number.isInteger(c.photo)&&c.photo>=0&&c.photo<photos.length).map(c=>({id:uid(),author:c.author,photo:c.photo,text:String(c.text||'').slice(0,5000),audio:media(c.audio,'audio'),voice:!!c.voice,status:['approved','pending','declined'].includes(c.status)?c.status:'pending'})),bookmarks:(Array.isArray(a.bookmarks)?a.bookmarks:[]).filter(b=>people[b.account]&&Number.isInteger(b.photo)&&b.photo>=0&&b.photo<photos.length)}})}
 document.addEventListener('click',async e=>{const button=e.target.closest('[data-action]');if(!button||button.disabled)return;const action=button.dataset.action,a=album();if(busy&&!['close-modal'].includes(action))return;
- if(standbyState&&!['wake-album','open-sleep-album','cancel-standby'].includes(action))return;
+ if(standbyState&&!['wake-album','cancel-standby'].includes(action))return;
  if(action==='album-standby'){beginStandby();return}
  if(action==='wake-album'){wakeStandby();return}
- if(action==='open-sleep-album'){openStandbyAlbum();return}
  if(action==='cancel-standby'){closeStandby();return}
  if(action==='focus-mode'){immersive=!immersive;render();return}
  if(['save-story','wizard-next','wizard-back','submit-contribution'].includes(action)&&recordProcessing){validation('Your recording is being prepared. Please try again in a moment.');return}
