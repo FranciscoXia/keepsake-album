@@ -44,13 +44,51 @@ const canTable=a=>canSee(a)&&a.devices.includes(tabletopDevice);
 const album=()=>data.albums.find(a=>a.id===currentId);
 const formattedDate=s=>new Date(s+'T12:00:00').toLocaleDateString('en-AU',{day:'numeric',month:'long',year:'numeric'});
 const audienceName=a=>a.audience==='private'?'Only me':a.audience==='family'?'Family circle':'Selected friends';
+let storageProblem='', pendingRestoreKey=null;
+function openStorage(){
+ return new Promise((resolve,reject)=>{
+  let settled=false;
+  const timer=setTimeout(()=>{if(!settled){settled=true;reject(Object.assign(new Error('Storage did not respond.'),{name:'TimeoutError'}))}},10000);
+  const finish=(error,value)=>{if(settled){value?.close();return}settled=true;clearTimeout(timer);error?reject(error):resolve(value)};
+  try{
+   const request=indexedDB.open('keepsake-memory-album',1);
+   request.onupgradeneeded=()=>{if(!request.result.objectStoreNames.contains('state'))request.result.createObjectStore('state')};
+   request.onsuccess=()=>{const connection=request.result;connection.onversionchange=()=>{connection.close();if(db===connection)db=null};connection.onclose=()=>{if(db===connection)db=null};finish(null,connection)};
+   request.onerror=()=>finish(request.error||new Error('Storage could not be opened.'));
+  }catch(error){finish(error)}
+ });
+}
+function writeState(connection,snapshot){
+ return new Promise((resolve,reject)=>{
+  let tx;
+  const timer=setTimeout(()=>{try{tx?.abort()}catch{}reject(Object.assign(new Error('Saving did not finish.'),{name:'TimeoutError'}))},10000);
+  const fail=()=>{clearTimeout(timer);reject(tx?.error||Object.assign(new Error('Saving was interrupted.'),{name:'AbortError'}))};
+  try{tx=connection.transaction('state','readwrite');tx.oncomplete=()=>{clearTimeout(timer);resolve()};tx.onerror=fail;tx.onabort=fail;tx.objectStore('state').put(snapshot,'albums')}catch(error){clearTimeout(timer);reject(error)}
+ });
+}
+function storageFailure(error){
+ const name=error?.name||'StorageError';
+ if(name==='QuotaExceededError')return 'Device storage is full or this browser has reached its storage limit (QuotaExceededError). Free device space, then choose Retry saving.';
+ if(name==='SecurityError'||name==='NotAllowedError')return 'This browser is blocking website storage ('+name+'). Export a backup and open the website in a normal Safari tab.';
+ return 'The browser could not finish saving ('+name+'). Choose Retry saving. If it keeps failing, export a backup before reopening Safari.';
+}
+function updateStorageNotice(){
+ const notice=$('#storage-notice');if(!notice)return;
+ notice.innerHTML=storageProblem?`<div class="notice-bar" role="alert" style="margin:16px 24px"><strong>Not saved yet.</strong> ${esc(storageProblem)}<p style="margin:8px 0">Your latest changes are available in this tab only. Keep it open until saving succeeds or you export a backup.</p><div class="action-row"><button class="btn" data-action="retry-save">Retry saving</button>${owner()?'<button class="btn" data-action="backup">Export backup</button>':''}</div></div>`:'';
+}
 async function init(){
- try {db=await new Promise((resolve,reject)=>{const r=indexedDB.open('keepsake-memory-album',1);r.onupgradeneeded=()=>r.result.createObjectStore('state');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)}); data=await new Promise((resolve,reject)=>{const r=db.transaction('state').objectStore('state').get('albums');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});}catch(e){console.warn('Local persistence unavailable',e)}
+ try {db=await openStorage();data=await new Promise((resolve,reject)=>{const tx=db.transaction('state');const r=tx.objectStore('state').get('albums');r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error);tx.onabort=()=>reject(tx.error||new Error('Reading storage was interrupted.'))});}catch(e){console.warn('Local persistence unavailable',e)}
  if(!data)data=initialState(); render();
 }
 async function save(){
- if(!db){toast('Browser storage is unavailable. Keep this tab open or export a backup.');return false;}
- try{await new Promise((resolve,reject)=>{const tx=db.transaction('state','readwrite');tx.objectStore('state').put(data,'albums');tx.oncomplete=resolve;tx.onerror=()=>reject(tx.error)});return true;}catch(e){toast('Could not save on this device. Export a backup before closing.');return false;}
+ // A Safari connection can close while the file picker or another app is open.
+ // Reopen once without deleting the database, then wait for the transaction commit.
+ let failure;
+ for(let attempt=0;attempt<2;attempt++){
+  try{if(!db)db=await openStorage();await writeState(db,data);storageProblem='';pendingRestoreKey=null;updateStorageNotice();return true;}
+  catch(error){failure=error;try{db?.close()}catch{}db=null;if(['QuotaExceededError','SecurityError','NotAllowedError','DataCloneError'].includes(error?.name))break;}
+ }
+ console.warn('Album save failed',failure);storageProblem=storageFailure(failure);updateStorageNotice();toast('Not saved yet. See the message above for recovery options.');return false;
 }
 function toast(msg){$('#toast').textContent=msg;$('#toast').classList.add('show');clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('#toast').classList.remove('show'),4200)}
 function wave(){return `<div class="wave" aria-hidden="true">${Array.from({length:38},(_,i)=>`<i style="height:${4+(i*17%19)}px"></i>`).join('')}</div>`}
@@ -60,7 +98,8 @@ function render(){
  document.body.classList.toggle('focus-album',view==='tabletop'&&immersive);
  const count=owner()?data.albums.reduce((n,a)=>n+a.contributions.filter(c=>c.status==='pending').length,0):0;
  const person=people[account];
- $('#app').innerHTML=`<div class="shell"><aside class="sidebar"><div><div class="brand">${icon('book')}<span>keepsake<span style="color:var(--coral)">.</span></span></div><div class="brand-sub">A hybrid memory album</div></div><nav class="nav" aria-label="Main navigation">${[['library','grid','My library'],['tabletop','book','Tabletop album'],['connections','users','People & devices'],['guide','info','Guide']].map(([v,i,t])=>`<button data-action="navigate" data-view="${v}" class="${view===v?'active':''}" aria-label="${t}" ${view===v?'aria-current="page"':''}>${icon(i)}${t}${v==='library'&&count?`<span class="dot">${count}</span>`:''}</button>`).join('')}</nav><div class="sidebar-note">${icon('heart')}<br>A little closer,<br>one memory at a time.<br><br><span style="font-size:9px">INTERACTIVE CONCEPT · 2026</span></div></aside><main class="main"><header class="topbar"><div class="crumb">Your space <span style="margin:0 8px">/</span> <b>${({library:'Memory library',tabletop:'The tabletop album',connections:'People & devices',guide:'Your demo companion'})[view]}</b></div><div class="top-actions"><span class="prototype">Local prototype</span><button class="profile" data-action="account" aria-label="Switch demo viewer account"><span class="avatar">${person.initial}</span><span>${person.name}<small>${person.role}</small></span>${icon('down')}</button></div></header>${view==='library'?libraryView():view==='tabletop'?tabletopView():view==='connections'?connectionsView():guideView()}</main></div>`;
+ $('#app').innerHTML=`<div class="shell"><aside class="sidebar"><div><div class="brand">${icon('book')}<span>keepsake<span style="color:var(--coral)">.</span></span></div><div class="brand-sub">A hybrid memory album</div></div><nav class="nav" aria-label="Main navigation">${[['library','grid','My library'],['tabletop','book','Tabletop album'],['connections','users','People & devices'],['guide','info','Guide']].map(([v,i,t])=>`<button data-action="navigate" data-view="${v}" class="${view===v?'active':''}" aria-label="${t}" ${view===v?'aria-current="page"':''}>${icon(i)}${t}${v==='library'&&count?`<span class="dot">${count}</span>`:''}</button>`).join('')}</nav><div class="sidebar-note">${icon('heart')}<br>A little closer,<br>one memory at a time.<br><br><span style="font-size:9px">INTERACTIVE CONCEPT · 2026</span></div></aside><main class="main"><header class="topbar"><div class="crumb">Your space <span style="margin:0 8px">/</span> <b>${({library:'Memory library',tabletop:'The tabletop album',connections:'People & devices',guide:'Your demo companion'})[view]}</b></div><div class="top-actions"><span class="prototype">Local prototype</span><button class="profile" data-action="account" aria-label="Switch demo viewer account"><span class="avatar">${person.initial}</span><span>${person.name}<small>${person.role}</small></span>${icon('down')}</button></div></header><div id="storage-notice"></div>${view==='library'?libraryView():view==='tabletop'?tabletopView():view==='connections'?connectionsView():guideView()}</main></div>`;
+ updateStorageNotice();
  if(view==='library'&&!currentId){const input=$('#search');if(input)input.addEventListener('input',e=>{query=e.target.value;updateGrid()})}
  if(view==='tabletop')$('.tabletop-bar').insertAdjacentHTML('beforeend',`<button class="btn ghost" data-action="focus-mode">${icon('tablet')}${immersive?'Exit focus mode':'Focus mode'}</button>`);
  if(view==='tabletop'&&currentId)attachSwipe();
@@ -177,6 +216,7 @@ function validateBackup(obj){if(obj?.format!=='keepsake-album'||obj.version!==1|
 document.addEventListener('click',async e=>{const button=e.target.closest('[data-action]');if(!button||button.disabled)return;const action=button.dataset.action,a=album();if(busy&&!['close-modal'].includes(action))return;
  if(action==='focus-mode'){immersive=!immersive;render();return}
  if(['save-story','wizard-next','wizard-back','submit-contribution'].includes(action)&&recordProcessing){validation('Your recording is being prepared. Please try again in a moment.');return}
+ if(action==='retry-save'){button.disabled=true;const ok=await save();if(ok){render();toast('Your albums are now saved on this device.')}else button.disabled=false;return}
  if(action==='navigate'){closeModal();view=button.dataset.view;currentId=null;query='';render();return}
  if(action==='close-modal'){closeModal();return}
  if(action==='account'){accountModal(button.dataset.person);return}
@@ -219,7 +259,7 @@ document.addEventListener('click',async e=>{const button=e.target.closest('[data
 document.addEventListener('change',async e=>{const input=e.target;if(input.name==='viewer'){document.querySelectorAll('.viewer-card').forEach(c=>c.classList.toggle('selected',c.querySelector('input').checked));$('#viewer-pin').value='';return}if(input.name==='audience'){$('#friend-choices').hidden=input.value!=='friends';$('#family-choices').hidden=input.value!=='family';return}if(input.id==='demo-voice'){audioVoice=input.checked;if(input.checked){recordingEpoch++;stopRecording();audioDraft=null;$('#audio-preview').innerHTML='';$('#record-status').textContent='Generated narration selected. Save to attach it.';}return}if(input.id==='device-select'){tabletopDevice=input.value;currentId=null;render();return}
  if(input.id==='photo-files'){const files=[...input.files];if(files.length+draft.photos.length>12){validation('Select up to 12 photographs in total.');return}busy=true;try{toast('Preparing your photographs locally…');for(const file of files){if(!['image/jpeg','image/png','image/webp'].includes(file.type))throw Error('Choose JPEG, PNG or WebP images.');draft.photos.push(await resizePhoto(file))}if(modalType==='wizard')wizardModal();toast(`${draft.photos.length} photographs selected.`)}catch(err){validation(err.message)}finally{busy=false}return}
  if(input.id==='audio-file'){const file=input.files[0];if(!file)return;if(file.size>8*1024*1024||!file.type.startsWith('audio/')){validation('Choose an audio file smaller than 8 MB.');return}try{recordingEpoch++;stopRecording();audioDraft=await readDataURL(file);audioVoice=false;$('#demo-voice').checked=false;$('#audio-preview').innerHTML=`<audio controls src="${esc(audioDraft)}" style="width:100%"></audio>`;$('#record-status').textContent='Audio file attached · ready to save.'}catch(err){validation('Could not read that audio file. Please choose another.')}return}
- if(input.id==='restore-file'){if(!owner())return;const file=input.files[0];if(!file)return;if(file.size>150*1024*1024){toast('Please choose a backup smaller than 150 MB.');return}try{const imported=validateBackup(JSON.parse(await file.text()));data.albums.unshift(...imported);const ok=await save();render();if(ok)toast(`${imported.length} albums restored as new copies.`)}catch(err){toast(err.message||'This backup could not be restored.')}return}
+ if(input.id==='restore-file'){if(!owner())return;const file=input.files[0];if(!file)return;if(file.size>150*1024*1024){toast('Please choose a backup smaller than 150 MB.');return}try{const key=[file.name,file.size,file.lastModified].join(':');if(pendingRestoreKey===key){const ok=await save();render();if(ok)toast('The previously imported albums are now saved.');return}const imported=validateBackup(JSON.parse(await file.text()));data.albums.unshift(...imported);pendingRestoreKey=key;const ok=await save();render();if(ok)toast(`${imported.length} albums restored as new copies.`)}catch(err){toast(err.message||'This backup could not be restored.')}return}
 });
 document.addEventListener('keydown',e=>{if(modalType){if(e.key==='Escape')closeModal();if(e.key==='Tab'){const items=[...$('.dialog').querySelectorAll('button:not(:disabled), input:not([type=file]), textarea, select, a[href], audio')].filter(el=>el.getClientRects().length);if(items.length){const first=items[0],last=items[items.length-1];if(e.shiftKey&&(document.activeElement===first||document.activeElement===$('.dialog'))){e.preventDefault();last.focus()}else if(!e.shiftKey&&document.activeElement===last){e.preventDefault();first.focus()}}}return}if(['INPUT','TEXTAREA','SELECT'].includes(document.activeElement.tagName))return;if(e.key==='ArrowRight'){e.preventDefault();turnPage(1)}if(e.key==='ArrowLeft'){e.preventDefault();turnPage(-1)}});
 window.addEventListener('pagehide',()=>{stopPlayback();stopRecording()});
